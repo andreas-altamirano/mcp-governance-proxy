@@ -14,10 +14,12 @@ swap this for the official `mcp` Python SDK.
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .proxy import GovernanceProxy
@@ -45,8 +47,43 @@ def _jsonrpc_error(id_: Any, code: int, message: str) -> Dict[str, Any]:
 
 # ----- App factory -----
 
-def create_app(proxy: GovernanceProxy) -> FastAPI:
-    """Build a FastAPI app that exposes `proxy` over HTTP."""
+ADMIN_TOKEN_ENV = "MCP_PROXY_ADMIN_TOKEN"
+
+
+def create_app(proxy: GovernanceProxy, admin_token: Optional[str] = None) -> FastAPI:
+    """Build a FastAPI app that exposes `proxy` over HTTP.
+
+    SECURITY: the /admin/* endpoints approve and reject held calls. They are
+    protected by a bearer token, supplied via `admin_token` or the
+    MCP_PROXY_ADMIN_TOKEN environment variable. If no token is configured the
+    admin API is DISABLED (503) rather than left open. Never give this token
+    to the agent: anything that holds it can approve its own held calls.
+    """
+    token = admin_token if admin_token is not None else os.environ.get(ADMIN_TOKEN_ENV)
+    if not token:
+        logger.warning(
+            "No admin token configured (set %s or pass admin_token). "
+            "The /admin endpoints are disabled; held calls cannot be approved.",
+            ADMIN_TOKEN_ENV,
+        )
+
+    def require_admin(request: Request) -> None:
+        if not token:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Admin API disabled: no admin token configured ({ADMIN_TOKEN_ENV}).",
+            )
+        header = request.headers.get("authorization", "")
+        scheme, _, supplied = header.partition(" ")
+        if scheme.lower() != "bearer" or not supplied or not hmac.compare_digest(
+            supplied.strip().encode(), token.encode()
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing admin token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     app = FastAPI(
         title="MCP Governance Proxy",
         description="Sits between MCP clients and real systems. Evaluates every tool call.",
@@ -59,7 +96,12 @@ def create_app(proxy: GovernanceProxy) -> FastAPI:
 
     @app.post("/mcp")
     async def mcp_endpoint(request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception:
+            return _jsonrpc_error(None, -32700, "Parse error: body is not valid JSON")
+        if not isinstance(body, dict):
+            return _jsonrpc_error(None, -32600, "Invalid Request: expected a JSON object")
         try:
             rpc = JsonRpcRequest(**body)
         except Exception as e:
@@ -101,7 +143,7 @@ def create_app(proxy: GovernanceProxy) -> FastAPI:
 
     # ----- Admin endpoints (for review UI) -----
 
-    @app.get("/admin/holds")
+    @app.get("/admin/holds", dependencies=[Depends(require_admin)])
     async def list_holds():
         return {
             "holds": [
@@ -117,14 +159,14 @@ def create_app(proxy: GovernanceProxy) -> FastAPI:
             ]
         }
 
-    @app.post("/admin/holds/{hold_id}/approve")
+    @app.post("/admin/holds/{hold_id}/approve", dependencies=[Depends(require_admin)])
     async def approve_hold(hold_id: str):
         outcome = await proxy.approve_held(hold_id)
         if outcome.status == CallStatus.FAILED:
             raise HTTPException(status_code=404, detail=outcome.result)
         return outcome.to_dict()
 
-    @app.post("/admin/holds/{hold_id}/reject")
+    @app.post("/admin/holds/{hold_id}/reject", dependencies=[Depends(require_admin)])
     async def reject_hold(hold_id: str):
         ok = proxy.reject_held(hold_id)
         if not ok:

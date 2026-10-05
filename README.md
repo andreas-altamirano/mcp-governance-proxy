@@ -36,12 +36,16 @@ This proxy solves both. The agent talks MCP to the proxy. The proxy holds the cr
 
 ## Install
 
+This project is not published on PyPI yet. Install straight from GitHub:
+
 ```bash
-pip install mcp-governance-proxy                # core
-pip install "mcp-governance-proxy[wave]"        # + wave-engine evaluator integration
+pip install "git+https://github.com/andreas-altamirano/mcp-governance-proxy"                  # core
+pip install "mcp-governance-proxy[wave] @ git+https://github.com/andreas-altamirano/mcp-governance-proxy"   # + wave-engine evaluator
 ```
 
 Python 3.9+. Depends on `fastapi`, `httpx`, `pydantic`, `uvicorn`.
+
+> **Security note — read before running this for real:** the `/admin` endpoints approve held calls, so they require a secret token (`MCP_PROXY_ADMIN_TOKEN`). See [Security](#security).
 
 ---
 
@@ -107,7 +111,7 @@ proxy = GovernanceProxy(
 app = create_app(proxy)
 ```
 
-Now refunds under $100 auto-execute, refunds over $100 hold for human approval at `/admin/holds`, and everything is logged with a Wave score.
+Now refunds under $100 auto-execute, refunds over $100 hold for human approval at `/admin/holds` (token required, see [Security](#security)), and everything is logged with a Wave score.
 
 ---
 
@@ -117,10 +121,10 @@ Now refunds under $100 auto-execute, refunds over $100 hold for human approval a
 git clone https://github.com/andreas-altamirano/mcp-governance-proxy
 cd mcp-governance-proxy
 pip install -e ".[dev]"
-python examples/minimal_server.py
+MCP_PROXY_ADMIN_TOKEN=demo-token python examples/minimal_server.py
 ```
 
-Server starts on `http://localhost:9000`. In another terminal:
+Server starts on `http://localhost:9000` (localhost only). In another terminal:
 
 ```bash
 # List available tools
@@ -141,11 +145,13 @@ curl -X POST http://localhost:9000/mcp \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"demo_refund","arguments":{"amount":500}}}'
 
-# See what's pending review
-curl http://localhost:9000/admin/holds
+# See what's pending review (needs the admin token)
+curl http://localhost:9000/admin/holds \
+  -H 'Authorization: Bearer demo-token'
 
 # Approve a held call
-curl -X POST http://localhost:9000/admin/holds/<hold_id>/approve
+curl -X POST http://localhost:9000/admin/holds/<hold_id>/approve \
+  -H 'Authorization: Bearer demo-token'
 ```
 
 The demo runs without any real API tokens — it uses a fake adapter that just echoes what it received.
@@ -160,9 +166,11 @@ The demo runs without any real API tokens — it uses a fake adapter that just e
 |---|---|---|
 | `/mcp` | POST | MCP JSON-RPC: `initialize`, `tools/list`, `tools/call` |
 | `/health` | GET | Liveness check |
-| `/admin/holds` | GET | List held calls awaiting review |
-| `/admin/holds/{id}/approve` | POST | Approve a held call (executes it now) |
-| `/admin/holds/{id}/reject` | POST | Reject a held call (drops it) |
+| `/admin/holds` | GET | List held calls awaiting review. **Bearer token required.** |
+| `/admin/holds/{id}/approve` | POST | Approve a held call (executes it now). **Bearer token required.** |
+| `/admin/holds/{id}/reject` | POST | Reject a held call (drops it). **Bearer token required.** |
+
+The admin endpoints return `401` for a missing or wrong token, and `503` if no admin token is configured at all (they are disabled by default, never left open).
 
 ### Python API
 
@@ -232,6 +240,29 @@ class JiraAdapter:
 ```
 
 Reference adapters live in `mcp_governance_proxy/adapters.py` — `SlackAdapter`, `GitHubAdapter`, and a generic `WebhookAdapter`. Copy and adapt for your systems.
+
+---
+
+## Security
+
+This is an early prototype. Know what it does and doesn't protect.
+
+**Admin token.** Approving a held call executes it, so the `/admin` endpoints require `Authorization: Bearer <token>`. Set the token with the `MCP_PROXY_ADMIN_TOKEN` environment variable or `create_app(proxy, admin_token=...)`. With no token set, the admin API is disabled (HTTP 503). **Never give this token to the agent** — anything that holds it can approve its own held calls. Keep it out of the agent's environment, config, and tool access.
+
+**Keep the proxy off the open internet.** Bind to localhost or a private network, and put TLS and network controls in front of it. The demo binds to `127.0.0.1` for this reason.
+
+**The agent must have no other route to your credentials.** The proxy only helps if every action goes through it. If the agent also has the raw Slack or GitHub token somewhere, the proxy can be bypassed.
+
+**`client_id` is not an identity.** The proxy reads it from a request header the client controls, so it can be spoofed. Don't write policy that trusts it as proof of who is calling.
+
+**Input validation.** The GitHub adapter only accepts `repo` in strict `owner/name` form and `issue_number` as a positive integer. If you write your own adapter, validate everything the agent sends before it touches a URL, command, or query.
+
+**Known limitations (not fixed yet):**
+- Held calls live in memory and are lost on restart.
+- There is no record of who approved a held call, and the policy is not re-checked at approval time.
+- No rate limiting. Logging goes through Python's standard logging only; there is no durable audit store.
+
+Found a security problem? Please open an issue or contact the maintainer.
 
 ---
 

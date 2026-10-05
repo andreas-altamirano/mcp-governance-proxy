@@ -38,8 +38,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-wave = ["wave-engine>=0.1.0"]
-dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "wave-engine>=0.1.0"]
+wave = ["wave-engine @ git+https://github.com/andreas-altamirano/wave-engine"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.23",
+    "wave-engine @ git+https://github.com/andreas-altamirano/wave-engine",
+]
 
 [project.urls]
 Homepage = "https://github.com/andreas-altamirano/mcp-governance-proxy"

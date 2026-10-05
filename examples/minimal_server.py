@@ -7,7 +7,10 @@ This example wires together:
 
 Run:
     pip install -e ".[dev,wave]"
-    python examples/minimal_server.py
+    MCP_PROXY_ADMIN_TOKEN=demo-token python examples/minimal_server.py
+
+The /admin endpoints need that token (Authorization: Bearer demo-token).
+Without MCP_PROXY_ADMIN_TOKEN they are disabled. Never give the token to an agent.
 
 Then in another terminal:
     # List tools
@@ -26,10 +29,11 @@ Then in another terminal:
       -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"demo_refund","arguments":{"amount":500}}}'
 
     # See what's pending review
-    curl http://localhost:9000/admin/holds
+    curl http://localhost:9000/admin/holds -H 'Authorization: Bearer demo-token'
 
     # Approve one
-    curl -X POST http://localhost:9000/admin/holds/<hold_id>/approve
+    curl -X POST http://localhost:9000/admin/holds/<hold_id>/approve \\
+      -H 'Authorization: Bearer demo-token'
 """
 
 import logging
@@ -127,4 +131,5 @@ app = create_app(proxy)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    # Localhost only. Don't expose an unauthenticated-by-default demo to the network.
+    uvicorn.run(app, host="127.0.0.1", port=9000)

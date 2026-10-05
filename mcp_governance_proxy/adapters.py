@@ -12,11 +12,36 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from .types import ToolCall
+
+# GitHub owner and repo names: letters, digits, '-', '_', '.'. Anything else
+# (slashes, '..', '?', '#', '%', whitespace) is rejected so a crafted `repo`
+# value can't redirect the token to a different API path.
+_GITHUB_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+def _validate_github_repo(repo: Any) -> str:
+    """Return `repo` if it is a well-formed 'owner/name', else raise ValueError."""
+    if not isinstance(repo, str):
+        raise ValueError("'repo' must be a string in 'owner/name' form")
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(_GITHUB_NAME.match(p) for p in parts):
+        raise ValueError("'repo' must look like 'owner/name'")
+    if any(p in (".", "..") for p in parts):
+        raise ValueError("'repo' must look like 'owner/name'")
+    return repo
+
+
+def _validate_issue_number(num: Any) -> int:
+    """Return `num` if it is a positive integer (not a bool), else raise ValueError."""
+    if isinstance(num, bool) or not isinstance(num, int) or num < 1:
+        raise ValueError("'issue_number' must be a positive integer")
+    return num
 
 
 # -----------------------------
@@ -128,7 +153,7 @@ class GitHubAdapter:
         if not self._token:
             raise RuntimeError("GitHubAdapter is not configured: set GITHUB_TOKEN")
         args = call.arguments or {}
-        repo = args["repo"]
+        repo = _validate_github_repo(args.get("repo"))
         headers = {
             "Authorization": f"Bearer {self._token}",
             "Accept": "application/vnd.github+json",
@@ -136,13 +161,16 @@ class GitHubAdapter:
         }
         async with httpx.AsyncClient(timeout=10) as client:
             if call.tool == "github_create_issue":
+                title = args.get("title")
+                if not isinstance(title, str) or not title.strip():
+                    raise ValueError("github_create_issue requires a non-empty 'title'")
                 r = await client.post(
                     f"https://api.github.com/repos/{repo}/issues",
                     headers=headers,
-                    json={"title": args["title"], "body": args.get("body", "")},
+                    json={"title": title, "body": str(args.get("body", ""))},
                 )
             elif call.tool == "github_close_issue":
-                num = args["issue_number"]
+                num = _validate_issue_number(args.get("issue_number"))
                 r = await client.patch(
                     f"https://api.github.com/repos/{repo}/issues/{num}",
                     headers=headers,
